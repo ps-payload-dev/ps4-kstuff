@@ -1,5 +1,5 @@
 # ps4-kstuff
-A library of patches for PS4 derived from the work of [PS4-HEN](https://github.com/Scene-Collective/ps4-hen) by Scene Collective
+A library of patches for PS4 derived from the work of [PS4-HEN](https://github.com/Scene-Collective/ps4-hen) by [Scene Collective](https://github.com/Scene-Collective)
 
 Installs the FSELF/FPKG kernel hooks and kernel patches, patches SceShellCore so packages and system versions are accepted, enables the kernel crash log, and applies the Remote Play patches. The firmwares in `source/generated/firmware_table.inc` are supported (4.74 to 14.00 at the moment); anything else is left untouched.
 
