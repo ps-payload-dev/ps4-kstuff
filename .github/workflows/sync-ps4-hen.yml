@@ -1,0 +1,154 @@
+name: Sync ps4-hen
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: sync-ps4-hen
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SYNCED: vendor/ps4-hen source/generated
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Pull ps4-hen headers, offsets, and exploit patches
+        run: sh tools/sync_hen.sh
+
+      - name: Check what changed
+        id: sync
+        run: |
+          if git diff --quiet -- $SYNCED; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "ps4-hen has no new patches."
+            exit 0
+          fi
+
+          # The sync only writes the vendored headers and the generated tables.
+          # Custom patches (source/custom) and kstuff's own code must never change.
+          unexpected=$(git status --porcelain | awk '{print $2}' | grep -v -E '^(vendor/ps4-hen/|source/generated/)' || true)
+          if [ -n "$unexpected" ]; then
+            echo "The sync touched files outside the synced paths:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+
+          old=$(git show HEAD:vendor/ps4-hen/UPSTREAM | sed -n 2p)
+          new=$(sed -n 2p vendor/ps4-hen/UPSTREAM)
+          {
+            echo "changed=true"
+            echo "old=$old"
+            echo "new=$new"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up both SDKs
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18
+          git clone --depth 1 https://github.com/ps-payload-dev/sdk.git "$RUNNER_TEMP/sdk"
+          make -C "$RUNNER_TEMP/sdk" DESTDIR="$RUNNER_TOOL_CACHE/ps-payload-sdk" clean install
+          echo "PS4_PAYLOAD_SDK=$RUNNER_TOOL_CACHE/ps-payload-sdk/ps4" >> "$GITHUB_ENV"
+          echo "PS5_PAYLOAD_SDK=$RUNNER_TOOL_CACHE/ps-payload-sdk/ps5" >> "$GITHUB_ENV"
+
+      - name: Get lib-ptrace
+        if: steps.sync.outputs.changed == 'true'
+        run: git clone --depth 1 https://github.com/ps-payload-dev/lib-ptrace.git "$RUNNER_TEMP/lib-ptrace"
+
+      - name: Build the library, ELF, BIN and kernel payload
+        id: build
+        if: steps.sync.outputs.changed == 'true'
+        continue-on-error: true
+        run: make PTRACE_DIR="$RUNNER_TEMP/lib-ptrace" BUILD="$RUNNER_TEMP/build"
+
+      - name: Merge the sync into main
+        if: steps.sync.outputs.changed == 'true' && steps.build.outcome == 'success'
+        run: |
+          new=${{ steps.sync.outputs.new }}
+          old=${{ steps.sync.outputs.old }}
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add $SYNCED
+          git commit -m "Sync ps4-hen to ${new:0:12}" \
+            -m "ps4-hen moved from ${old:0:12} to ${new:0:12}: https://github.com/Scene-Collective/ps4-hen/compare/${old}...${new}" \
+            -m "The helper headers and the firmware, Remote Play and exploit fix tables were regenerated. Custom patches are untouched. The library, ELF, BIN and kernel payload built successfully before this merge."
+          git push origin HEAD:${{ github.event.repository.default_branch }}
+
+      - name: Open a pull request when the build fails
+        if: steps.sync.outputs.changed == 'true' && steps.build.outcome == 'failure'
+        run: |
+          branch=sync-ps4-hen
+          new=${{ steps.sync.outputs.new }}
+          old=${{ steps.sync.outputs.old }}
+          bot_email=41898282+github-actions[bot]@users.noreply.github.com
+
+          git config user.name "github-actions[bot]"
+          git config user.email "$bot_email"
+          git checkout -B "$branch"
+          git add $SYNCED
+          git commit -m "Sync ps4-hen to ${new:0:12}" \
+            -m "The build failed after this sync, so it needs a manual look before merging."
+
+          remote_tip=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
+          if [ -n "$remote_tip" ]; then
+            git fetch origin "$branch"
+            remote_email=$(git show -s --format=%ae FETCH_HEAD)
+            if [ "$remote_email" != "$bot_email" ]; then
+              echo "Refusing to overwrite $branch: its tip is not authored by github-actions[bot]" >&2
+              exit 1
+            fi
+            git push --force-with-lease="refs/heads/$branch:$remote_tip" origin "HEAD:refs/heads/$branch"
+          else
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+
+          body="ps4-hen moved from ${old:0:12} to ${new:0:12}: https://github.com/Scene-Collective/ps4-hen/compare/${old}...${new}
+
+          The build failed with the regenerated files, so this was not merged automatically. A new firmware may need an entry in the custom patches under source/custom, or menu_jump in source/hen/remoteplay.cpp and patch_set in source/hen/shellcore.cpp."
+
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --head "$branch" --title "Sync ps4-hen to ${new:0:12}" --body "$body"
+          else
+            gh pr edit "$branch" --title "Sync ps4-hen to ${new:0:12}" --body "$body"
+          fi
+
+      - name: Report upstream runtime changes
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          old=${{ steps.sync.outputs.old }}
+          new=${{ steps.sync.outputs.new }}
+          git clone --quiet --filter=blob:none https://github.com/Scene-Collective/ps4-hen.git "$RUNNER_TEMP/ps4-hen"
+          files=$(git -C "$RUNNER_TEMP/ps4-hen" diff --name-only "$old" "$new" -- kpayload/source installer/source | grep -v '/offsets/' || true)
+          [ -n "$files" ] || exit 0
+
+          title="ps4-hen runtime code changed (${new:0:12})"
+          if [ -n "$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[].number')" ]; then
+            exit 0
+          fi
+
+          gh issue create --title "$title" --body "ps4-hen changed code that is not imported automatically between ${old:0:12} and ${new:0:12}: https://github.com/Scene-Collective/ps4-hen/compare/${old}...${new}
+
+          Files:
+
+          $(echo "$files" | sed 's/^/- /')
+
+          The tables and headers were synced, but the logic in these files is ported by hand (kernel/, source/hen/). Check whether anything needs porting."
