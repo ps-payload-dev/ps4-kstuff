@@ -23,6 +23,21 @@ struct kernel_args {
   uintptr_t base, image, size, unused[2];
 };
 
+static void kernel_text_poke(volatile uint8_t *address, uint8_t value) {
+  uintptr_t flags;
+  uintptr_t cr0;
+
+  __asm__ volatile("pushfq\n\tpopq %0\n\tcli" : "=r"(flags) : : "memory");
+  __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+  __asm__ volatile("mov %0, %%cr0"
+                   :
+                   : "r"(cr0 & ~(uintptr_t)(1 << 16))
+                   : "memory");
+  *address = value;
+  __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+  __asm__ volatile("pushq %0\n\tpopfq" : : "r"(flags) : "memory", "cc");
+}
+
 int kstuff_kernel_exec(void *td, struct kernel_args *args) {
   (void)td;
 
@@ -40,18 +55,10 @@ int kstuff_kernel_exec(void *td, struct kernel_args *args) {
   void (*pmap_protect)(void *, uintptr_t, uintptr_t, uint8_t) =
       (void *)(base + fw->pmap_protect);
 
-  uintptr_t cr0;
-
-  __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-
-  uintptr_t writable = cr0 & ~(uintptr_t)(1 << 16);
-
-  __asm__ volatile("mov %0, %%cr0" : : "r"(writable) : "memory");
-  *check = 0xeb;
+  kernel_text_poke(check, 0xeb);
   pmap_protect((void *)(base + fw->pmap_store), image & ~(uintptr_t)0x3fff,
                (image + args->size + 0x3fff) & ~(uintptr_t)0x3fff, 7);
-  *check = 0x75;
-  __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+  kernel_text_poke(check, 0x75);
 
   return ((int (*)(void))(image + header->entry))();
 }
