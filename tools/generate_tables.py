@@ -64,6 +64,23 @@ SHELLCORE = [
 
 REMOTE_PLAY = ["remote_play_menu_patch", "SceRemotePlay_patch1", "SceRemotePlay_patch2"]
 
+# ps4-hen's own offset files are wrong for these; each was independently verified
+# against the real decrypted kernel/exploit image.
+VERIFIED_OFFSETS = {
+    474: {"_sx_xlock_addr": 0x390850},
+    500: {"_sx_xlock_addr": 0xf5d00},
+    501: {"_sx_xlock_addr": 0xf5d00},
+    503: {"_sx_xlock_addr": 0xf5e10},
+    600: {"strstr_addr": 0x4247d0},
+    602: {"strstr_addr": 0x4247d0},
+    651: {"sceSblAuthMgrIsLoadable__sceSblACMgrGetPathId_hook": 0x65817c},
+}
+
+VERIFIED_EXPLOIT_OFFSETS = {
+    1000: {0x392070b: 0x39207b},
+    1001: {0x392070b: 0x39207b},
+}
+
 
 def fail(message):
     sys.exit(f"generate_tables.py: {message}")
@@ -285,7 +302,36 @@ def read_exploit_fixes(path, versions):
     for version in versions - table.keys():
         table[version] = []
 
+    apply_verified_exploit_offsets(table)
+
     return table
+
+
+def apply_verified_offsets(version, offsets):
+    for name, value in VERIFIED_OFFSETS.get(version, {}).items():
+        if name not in offsets:
+            fail(f"{version}: {name} is missing from the ps4-hen sources")
+
+        if offsets[name] != value:
+            print(f"{version}: {name} {hexv(offsets[name])} from ps4-hen replaced by verified {hexv(value)}")
+            offsets[name] = value
+
+
+def apply_verified_exploit_offsets(table):
+    for version, replacements in VERIFIED_EXPLOIT_OFFSETS.items():
+        if version not in table:
+            continue
+
+        patches = []
+
+        for offset, data in table[version]:
+            if offset in replacements:
+                print(f"{version}: exploit patch {hexv(offset)} from ps4-hen replaced by verified {hexv(replacements[offset])}")
+                offset = replacements[offset]
+
+            patches.append((offset, data))
+
+        table[version] = patches
 
 
 def write_exploit_fixes(path, table):
@@ -396,6 +442,8 @@ def main():
     for source in sources:
         version = int(source.stem)
         offsets = read_offsets(source)
+
+        apply_verified_offsets(version, offsets)
 
         firmware.append(firmware_entry(version, offsets, installer, symbols))
         remote_play.append(remote_play_entry(version, offsets))
