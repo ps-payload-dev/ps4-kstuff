@@ -45,6 +45,8 @@ static const kstuff_crash_log_site crash_log_sites[] = {
 
 static const uint8_t crash_log_original[] = {0x55, 0x48, 0x89, 0xe5};
 static const uint8_t crash_log_patched[] = {0xb0, 0x01, 0xc3, 0x90};
+static const uint8_t crash_log_returns_one[] = {0x48, 0xc7, 0xc0, 0x01,
+                                                0x00, 0x00, 0x00, 0xc3};
 static const uint8_t crash_log_tail[] = {0x31, 0xc9, 0x83, 0xf8, 0x01, 0x0f,
                                          0x94, 0xc1, 0x89, 0xc8, 0x5d, 0xc3};
 
@@ -75,13 +77,20 @@ int kstuff_apply_crash_log(uintptr_t base, uint32_t version) {
   }
 
   bool original = !memcmp(bytes, crash_log_original, sizeof(crash_log_original));
-  bool patched = !memcmp(bytes, crash_log_patched, sizeof(crash_log_patched));
+  bool patched = !memcmp(bytes, crash_log_patched, sizeof(crash_log_patched)) ||
+                 !memcmp(bytes, crash_log_returns_one,
+                         sizeof(crash_log_returns_one));
+  bool tail_ok = !memcmp(bytes + 9, crash_log_tail, sizeof(crash_log_tail));
 
-  if ((!original && !patched) || bytes[4] != 0xe8 ||
-      memcmp(bytes + 9, crash_log_tail, sizeof(crash_log_tail))) {
+  if (!tail_ok || (!original && !patched) || (original && bytes[4] != 0xe8)) {
     kstuff_log("[Kstuff] Crash log site +%#x does not hold the kit check; "
-               "patch skipped\n",
-               site->offset);
+               "patch skipped; bytes %02x %02x %02x %02x %02x %02x %02x %02x "
+               "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x "
+               "%02x\n",
+               site->offset, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+               bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
+               bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+               bytes[16], bytes[17], bytes[18], bytes[19], bytes[20]);
     errno = ENOEXEC;
 
     return -1;
